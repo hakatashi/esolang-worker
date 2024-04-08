@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  ECSTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: esolang-worker-node
+          Essential: true
+          Image: 945534687854.dkr.ecr.ap-northeast-1.amazonaws.com/esolang-worker-node:latest
+          LogConfiguration:
+            LogDriver: awsfirelens
+          Environment:
+            - Name: ESOLANG_WORKER_CODE
+              Value: /tmp
+        - Name: esolang-worker-log-router
+          Essential: true
+          Image: 945534687854.dkr.ecr.ap-northeast-1.amazonaws.com/esolang-log-router:latest
+          FirelensConfiguration:
+            type: fluentbit
+            options:
+              enable-ecs-log-metadata: 'true'
+              config-file-type: file
+              config-file-value: /fluent-bit.conf
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/esolang-test
+              awslogs-region: ap-northeast-1
+              awslogs-create-group: 'true'
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: FLB_LOG_LEVEL
+              Value: debug
+      Cpu: 256
+      Family: esolang-worker-node
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: esolang-worker-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: AllowTaskToCreateLogStreamAndPutLog
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  - 'arn:aws:s3:::esolang-worker'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - 'arn:aws:s3:::esolang-worker/0123456789/code'
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: esolang-worker-execution-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+  # We have to define a special VPC to disallow internet access and run on fargate
+  # https://repost.aws/knowledge-center/ecs-fargate-tasks-private-subnet
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags: 
+        - Key: Name
+          Value: esolang-worker-vpc
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties: 
+      AvailabilityZone: "ap-northeast-1a"
+      CidrBlock: 10.1.100.0/24
+      VpcId: !Ref VPC
+      Tags: 
+        - Key: Name
+          Value: esolang-worker-subnet
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: esolang-worker-route-table
+  RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds:
+        - !Ref RouteTable
+      VpcEndpointType: Gateway
+  ECRApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref Subnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+  ECRDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref Subnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref Subnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: esolang-worker security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags: 
+        - Key: Name
+          Value: esolang-worker-security-group
+Outputs:
+  VPC:
+    Value: !Ref VPC
+    Export:
+      Name: esolang-worker-vpc
+  Subnet:
+    Value: !Ref Subnet
+    Export:
+      Name: esolang-worker-subnet
+  SecurityGroup:
+    Value: !Ref SecurityGroup
+    Export:
+      Name: esolang-worker-security-group
