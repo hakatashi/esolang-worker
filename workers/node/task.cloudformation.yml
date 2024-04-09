@@ -70,8 +70,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - 's3:GetObject'
+                  - 's3:PutObject'
                 Resource:
-                  - 'arn:aws:s3:::esolang-worker/0123456789/code'
+                  - 'arn:aws:s3:::esolang-worker/*'
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:

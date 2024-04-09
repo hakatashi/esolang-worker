@@ -1,12 +1,19 @@
 #!/bin/sh
 
-echo "This is stdout"
-echo "This is stderr" >&2
+set -e
 
-echo "ESOLANG_WORKER_CODE: $ESOLANG_WORKER_CODE"
+execution_id=$ESOLANG_WORKER_EXECUTION_ID
 
-echo "=== Testing internet access ==="
+echo "=== Downloading code and stdin ==="
 
-aws s3 cp s3://esolang-worker/0123456789/code .
+aws s3 cp s3://esolang-worker/$execution_id/code /tmp/code
+aws s3 cp s3://esolang-worker/$execution_id/stdin /tmp/stdin
 
-cat code
+echo "=== Running script ==="
+
+script /tmp/code < /tmp/stdin > /tmp/stdout 2> /tmp/stderr
+
+echo "=== Finished Running script ==="
+
+aws s3 cp /tmp/stdout s3://esolang-worker/$execution_id/stdout
+aws s3 cp /tmp/stderr s3://esolang-worker/$execution_id/stderr

@@ -1,72 +1,152 @@
-import type {DescribeLogStreamsCommandInput, GetLogEventsCommandInput} from '@aws-sdk/client-cloudwatch-logs';
-import {CloudWatchLogsClient, DescribeLogStreamsCommand, GetLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
-import type {RunTaskCommandInput} from '@aws-sdk/client-ecs';
-import {ECSClient, RunTaskCommand} from '@aws-sdk/client-ecs';
+import type {DescribeTasksCommandInput, RunTaskCommandInput} from '@aws-sdk/client-ecs';
+import {ECSClient, RunTaskCommand, waitUntilTasksStopped} from '@aws-sdk/client-ecs';
+import {S3Client, PutObjectCommand, GetObjectCommand} from '@aws-sdk/client-s3';
+import type {PutObjectCommandInput, GetObjectCommandInput} from '@aws-sdk/client-s3'; // ES Modules import
+import type {WaiterConfiguration} from '@smithy/util-waiter';
 import {config as getConfig} from 'firebase-functions';
 import * as logger from 'firebase-functions/logger';
 import {onRequest} from 'firebase-functions/v2/https';
+import uniqid from 'uniqid';
 
 const config = getConfig();
 
-export const helloWorld = onRequest(async (request, response) => {
-	logger.info('Hello logs!', {structuredData: true});
+const ecs = new ECSClient({
+	region: 'ap-northeast-1',
+	credentials: {
+		accessKeyId: config.aws.access_key,
+		secretAccessKey: config.aws.secret_access_key,
+	},
+});
 
-	const ecs = new ECSClient({
-		region: 'ap-northeast-1',
-		credentials: {
-			accessKeyId: config.aws.access_key,
-			secretAccessKey: config.aws.secret_access_key,
-		},
-	});
+const s3 = new S3Client({
+	region: 'ap-northeast-1',
+	credentials: {
+		accessKeyId: config.aws.access_key,
+		secretAccessKey: config.aws.secret_access_key,
+	},
+});
 
-	const runTaskParams: RunTaskCommandInput = {
-		cluster: 'esolang-test',
-		taskDefinition: 'esolang-worker-node',
-		count: 1,
-		capacityProviderStrategy: [
-			{
-				capacityProvider: 'FARGATE_SPOT',
-				base: 0,
-				weight: 1,
+export const helloWorld = onRequest({timeoutSeconds: 300}, async (request, response) => {
+	const code = [
+		'console.log("hello");',
+		'console.error("world");',
+	].join('\n');
+
+	const executionId = uniqid();
+	logger.info(`Execution ID: ${executionId}`);
+
+	{
+		const putObjectParams: PutObjectCommandInput = {
+			Bucket: 'esolang-worker',
+			Key: `${executionId}/code`,
+			Body: Buffer.from(code, 'utf-8'),
+		};
+		const putObjectResult = await s3.send(new PutObjectCommand(putObjectParams));
+		logger.info(putObjectResult);
+	}
+
+	{
+		const putObjectParams: PutObjectCommandInput = {
+			Bucket: 'esolang-worker',
+			Key: `${executionId}/stdin`,
+			Body: Buffer.from('hoge', 'utf-8'),
+		};
+		const putObjectResult = await s3.send(new PutObjectCommand(putObjectParams));
+		logger.info(putObjectResult);
+	}
+
+	{
+		const runTaskParams: RunTaskCommandInput = {
+			cluster: 'esolang-worker',
+			taskDefinition: 'esolang-worker-node',
+			count: 1,
+			capacityProviderStrategy: [
+				{
+					capacityProvider: 'FARGATE',
+					base: 0,
+					weight: 1,
+				},
+			],
+			networkConfiguration: {
+				awsvpcConfiguration: {
+					subnets: ['subnet-0eca90bd815af7171'],
+					assignPublicIp: 'DISABLED',
+					securityGroups: ['sg-0f48b176008f277aa'],
+				},
 			},
-		],
-		networkConfiguration: {
-			awsvpcConfiguration: {
-				subnets: ['subnet-e686fdce'],
-				assignPublicIp: 'DISABLED',
-				securityGroups: ['sg-3b66cb5f'],
+			overrides: {
+				containerOverrides: [
+					{
+						name: 'esolang-worker-node',
+						environment: [
+							{
+								name: 'ESOLANG_WORKER_EXECUTION_ID',
+								value: executionId,
+							},
+						],
+					},
+				],
 			},
-		},
-	};
+		};
 
-	const runTaskResult = await ecs.send(new RunTaskCommand(runTaskParams));
+		const runTaskResult = await ecs.send(new RunTaskCommand(runTaskParams));
 
-	logger.info(runTaskResult);
+		logger.info(runTaskResult);
 
-	const cloudwatch = new CloudWatchLogsClient({
-		region: 'ap-northeast-1',
-		credentials: {
-			accessKeyId: config.aws.access_key,
-			secretAccessKey: config.aws.secret_access_key,
-		},
-	});
+		if (!runTaskResult.tasks || runTaskResult.tasks.length === 0) {
+			throw new Error('Task not found');
+		}
 
-	const describeLogStreamsParams: DescribeLogStreamsCommandInput = {
-		logGroupName: '/ecs/esolang-test',
-	};
+		const task = runTaskResult.tasks[0].taskArn;
 
-	const describeLogStreamsResult = await cloudwatch.send(new DescribeLogStreamsCommand(describeLogStreamsParams));
+		if (!task) {
+			throw new Error('Task not found');
+		}
 
-	logger.info(describeLogStreamsResult);
+		const waiterParams: WaiterConfiguration<ECSClient> = {
+			client: ecs,
+			maxWaitTime: 300,
+			minDelay: 1,
+			maxDelay: 1,
+		};
 
-	const getLogEventsParams: GetLogEventsCommandInput = {
-		logGroupName: '/ecs/esolang-test',
-		logStreamName: describeLogStreamsResult.logStreams![1].logStreamName!,
-	};
+		const waitUntilTasksStoppedParams: DescribeTasksCommandInput = {
+			cluster: 'esolang-worker',
+			tasks: [task],
+		};
 
-	const getLogEventsResult = await cloudwatch.send(new GetLogEventsCommand(getLogEventsParams));
+		await waitUntilTasksStopped(waiterParams, waitUntilTasksStoppedParams);
 
-	logger.info(getLogEventsResult);
+		logger.info('Task has stopped');
+	}
 
-	response.json(getLogEventsResult);
+	{
+		const getObjectParams: GetObjectCommandInput = {
+			Bucket: 'esolang-worker',
+			Key: `${executionId}/stdout`,
+		};
+		const getObjectResult = await s3.send(new GetObjectCommand(getObjectParams));
+		const body = await getObjectResult.Body?.transformToByteArray();
+		if (!body) {
+			throw new Error('Body not found');
+		}
+		const bodyBuffer = Buffer.from(body);
+		logger.info(bodyBuffer.toString('utf-8'));
+	}
+
+	{
+		const getObjectParams: GetObjectCommandInput = {
+			Bucket: 'esolang-worker',
+			Key: `${executionId}/stderr`,
+		};
+		const getObjectResult = await s3.send(new GetObjectCommand(getObjectParams));
+		const body = await getObjectResult.Body?.transformToByteArray();
+		if (!body) {
+			throw new Error('Body not found');
+		}
+		const bodyBuffer = Buffer.from(body);
+		logger.info(bodyBuffer.toString('utf-8'));
+	}
+
+	response.send('ok');
 });

@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+  ECSTestTaskDefinition:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !GetAtt ECSTestTaskRole.Arn
+      ExecutionRoleArn: !GetAtt ECSTestExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: Test
+          Image: public.ecr.aws/aws-cli/aws-cli
+          Command:
+            - 's3'
+            - 'cp'
+            - 's3://esolang-worker/0123456789/code'
+            - '-'
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/test
+              awslogs-region: ap-northeast-1
+              awslogs-create-group: 'true'
+              awslogs-stream-prefix: ecs
+      Family: ecs-test
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+  ECSTestTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecs-test-task-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: AllowTaskToCreateLogStreamAndPutLog
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  - 'arn:aws:s3:::esolang-worker'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - 'arn:aws:s3:::esolang-worker/0123456789/code'
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'aws:TagKeys':
+                      - Status
+  ECSTestExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecs-test-execution-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: AllowTaskToCreateLogStreamAndPutLog
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
